@@ -8,6 +8,8 @@ import (
 	"io"
 	"os"
 	"path"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/ulikunitz/xz"
@@ -18,9 +20,11 @@ import (
 
 func main() {
 	var (
-		openLimit int64 = 10
-		flagLevel       = zap.WarnLevel
-		ctx             = context.Background()
+		openLimit int64  = 10
+		flagLevel        = zap.WarnLevel
+		ctx              = context.Background()
+		flagMode  string = "755"
+		fileMode  os.FileMode
 	)
 
 	maxLimit, limErr := getFileLimit()
@@ -28,6 +32,11 @@ func main() {
 		openLimit = maxLimit
 	}
 
+	if stat, err := os.Stat("."); err == nil {
+		flagMode = fmt.Sprintf("%03o", uint32(stat.Mode()&0x1ff))
+	}
+
+	flag.StringVar(&flagMode, "m", flagMode, "directory permissions")
 	flag.Var(&flagLevel, "v", "log level")
 	flag.Int64Var(&openLimit, "L", openLimit, "concurrent file limit")
 	flag.Parse()
@@ -42,25 +51,40 @@ func main() {
 	zap.ReplaceGlobals(logger)
 	ctx = WithLogger(ctx, logger)
 
+	// Parse file mode
+	parsedMode, err := strconv.ParseUint(flagMode, 8, 32)
+	if err != nil {
+		logger.Fatal("Invalid file mode: cannot be parsed", zap.Error(err))
+	} else if parsedMode == 0 {
+		logger.Fatal("Invalid file mode: may not be 0")
+	}
+	fileMode = os.FileMode(parsedMode)
+
 	// Check limit
-	if openLimit <= 0 {
-		logger.Fatal("Invalid limit -- must be >= 0", zap.Int64("limit", openLimit))
+	if openLimit < 2 {
+		logger.Fatal("Invalid limit -- must be >= 2", zap.Int64("limit", openLimit))
 	} else if openLimit > maxLimit {
 		logger.Fatal("Invalid limit -- must be <= nofiles", zap.Int64("nofiles", maxLimit), zap.Int64("limit", openLimit))
 	}
 
-	// Semaphore controls no. of open files via goroutines -- all acquisitions have a weight of 1
+	// Semaphore controls no. of open files via goroutines -- all acquisitions have a weight of
+	// 2 -- one for the package, one for a new file.
 	sema := semaphore.NewWeighted(openLimit)
 	wg, ctx := errgroup.WithContext(ctx)
+
+	dumper := &Dumper{
+		DirMode: fileMode,
+	}
 
 	for _, file := range flag.Args() {
 		file := file
 		wg.Go(func() error {
-			if err := sema.Acquire(ctx, 1); err != nil {
+			if err := sema.Acquire(ctx, 2); err != nil {
 				return err
 			}
-			defer sema.Release(1)
-			return processPackage(ctx, file)
+			defer sema.Release(2)
+			_, err := dumper.processPackage(ctx, file)
+			return err
 		})
 	}
 
@@ -70,14 +94,20 @@ func main() {
 }
 
 const (
-	manPathPrefix = "usr/share/man/man"
+	manPathPrefix     = "usr/share/man/man"
+	manPathTrimPrefix = "usr/share/man/"
 )
 
 // TODO: Propagate list of created files up to caller so that they can be tracked relative as
 // new files.
 
+// Dumper processes packages and dumps manpage files to the current directory in the form manN/file.
+type Dumper struct {
+	DirMode os.FileMode
+}
+
 // processPackage processes an XBPS package and extracts all manpages under the current directory.
-func processPackage(ctx context.Context, file string) error {
+func (d *Dumper) processPackage(ctx context.Context, file string) (names []string, err error) {
 	timer := Elapsed("elapsed")
 	ctx = WithFields(ctx, logFile(file))
 
@@ -87,14 +117,14 @@ func processPackage(ctx context.Context, file string) error {
 	f, err := os.Open(file)
 	if err != nil {
 		Error(ctx, "Cannot open file", zap.Error(err))
-		return err
+		return nil, err
 	}
 	defer logClose(ctx, f)
 
 	dec, err := xz.NewReader(f)
 	if err != nil {
 		Error(ctx, "Unable to create decompressor", zap.Error(err))
-		return err
+		return nil, err
 	}
 
 	tf := tar.NewReader(dec)
@@ -102,45 +132,73 @@ func processPackage(ctx context.Context, file string) error {
 	for {
 		hdr, err := tf.Next()
 		if err == io.EOF {
-			return nil
+			break
 		} else if err != nil {
 			Error(ctx, "Error encountered reading package", zap.Error(err))
-			return err
+			return names, err
 		}
 
-		if err := processPackageFile(ctx, hdr, tf); err != nil {
+		dumped, err := d.processPackageFile(ctx, hdr, tf)
+		if err != nil {
 			Error(ctx, "Error processing package file", logPkgFile(hdr.Name), zap.Error(err))
-			return err
+			return names, err
+		}
+
+		if dumped {
+			names = append(names, hdr.Name)
 		}
 	}
 
-	return nil
+	return names, nil
 }
 
 // processPackageFile checks the tar header to see if the packaged file is a manpage and, if it is,
 // extracts it. If the packaged file is a manpage symlink or link, it is ignored.
-func processPackageFile(ctx context.Context, hdr *tar.Header, r io.Reader) error {
+func (d *Dumper) processPackageFile(ctx context.Context, hdr *tar.Header, r io.Reader) (dumped bool, err error) {
+	ctx = WithFields(ctx, logPkgFile(hdr.Name))
+
 	switch hdr.Typeflag {
 	case tar.TypeReg:
 	case tar.TypeLink, tar.TypeSymlink:
 		// TODO: Handle manpage symlinks at all?
 		// return processManLink(ctx, hdr)
-		return nil
+		return false, nil
 	default:
-		return nil
+		return false, nil
 	}
 
 	pkgfile := path.Clean(hdr.Name)
 	if !strings.HasPrefix(pkgfile, manPathPrefix) {
-		return nil
+		return false, nil
 	}
 
-	Debug(ctx, "Found manpage", logPkgFile(hdr.Name))
+	Debug(ctx, "Found manpage")
+
+	relpath := strings.TrimPrefix(pkgfile, manPathTrimPrefix)
+	relpath = filepath.FromSlash(relpath)
+	reldir := filepath.Dir(relpath)
+
+	ctx = WithFields(ctx, logDumpFile(relpath))
+
+	if err = os.MkdirAll(reldir, d.DirMode); err != nil {
+		Error(ctx, "Unable to create directory for manpage", zap.Error(err))
+		return false, err
+	}
 
 	// TODO: Dump manpage to filesystem after stripping usr/share/ prefix
-	_, err := io.Copy(os.Stdout, r)
+	f, err := os.Create(relpath)
+	if err != nil {
+		Error(ctx, "Unable to create dumped file")
+		return false, err
+	}
+	defer logClose(ctx, f)
 
-	return err
+	if _, err := io.Copy(f, r); err != nil {
+		Error(ctx, "Error copying pkgfile to dumpfile", zap.Error(err))
+		return false, err
+	}
+
+	return true, nil
 }
 
 func logClose(ctx context.Context, c io.Closer) (err error) {

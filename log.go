@@ -23,6 +23,10 @@ func logFile(file string) zap.Field {
 	return zap.String("file", file)
 }
 
+func logDumpFile(file string) zap.Field {
+	return zap.String("dumpfile", file)
+}
+
 func logPkgFile(file string) zap.Field {
 	return zap.String("pkgfile", file)
 }
