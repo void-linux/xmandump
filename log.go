@@ -16,6 +16,7 @@ func NewLogger(level zap.AtomicLevel) (*zap.Logger, error) {
 	conf.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	conf.EncoderConfig.EncodeDuration = zapcore.StringDurationEncoder
 	conf.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+	conf.Sampling = nil // Disable rate limiting -- this is a CLI tool, we don't care too much.
 	return conf.Build()
 }
 
