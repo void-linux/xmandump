@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,6 +22,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
+	"howett.net/plist"
 )
 
 const (
@@ -32,15 +35,18 @@ type cacheRecords struct {
 }
 
 func main() {
+	timer := Elapsed("elapsed")
+
 	// TODO: Make this code less disgusting.
 	var (
-		openLimit int64  = 64
-		flagLevel        = zap.WarnLevel
-		ctx              = context.Background()
-		flagMode  string = "755"
-		fileMode  os.FileMode
-		cacheFile string
-		cache     cacheRecords
+		openLimit      int64  = 64
+		flagLevel             = zap.WarnLevel
+		ctx                   = context.Background()
+		flagMode       string = "755"
+		fileMode       os.FileMode
+		cacheFile      string
+		cache          cacheRecords
+		removeOldFiles bool
 	)
 
 	maxLimit, limErr := getFileLimit()
@@ -52,6 +58,7 @@ func main() {
 		flagMode = fmt.Sprintf("%03o", uint32(stat.Mode()&0x1ff))
 	}
 
+	flag.BoolVar(&removeOldFiles, "b", false, "remove old files")
 	flag.StringVar(&cacheFile, "c", "", "cache file")
 	flag.StringVar(&flagMode, "m", flagMode, "directory permissions")
 	flag.Var(&flagLevel, "v", "log level")
@@ -64,6 +71,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Fatal error: unable to create logger: %v\n", err)
 		os.Exit(1)
 	}
+
+	defer func() { logger.Info("Done", timer()) }()
 
 	zap.ReplaceGlobals(logger)
 	ctx = WithLogger(ctx, logger)
@@ -134,12 +143,25 @@ func main() {
 		logger.Fatal("Fatal error processing files", zap.Error(err))
 	}
 
+	// If we're not removing old files, just copy everything from the cache into updates.
+	if !removeOldFiles {
+		for k, files := range dumper.Cache {
+			_, ok := dumper.Updates[k]
+			if ok {
+				continue
+			}
+			dumper.Updates[k] = files
+		}
+	}
+
+	// Remove anything in updates from the filerefs map
 	for _, files := range dumper.Updates {
 		for _, file := range files {
 			delete(filerefs, file)
 		}
 	}
 
+	// Remove old files
 	for file, _ := range filerefs {
 		if filepath.IsAbs(file) || strings.Contains(filepath.ToSlash(file), "../") {
 			// This is to prevent removal of paths like /usr/share/man/... in case
@@ -153,6 +175,7 @@ func main() {
 		}
 	}
 
+	// Dump cache
 	cache = cacheRecords{
 		Version: cacheVersion,
 		Cache:   dumper.Updates,
@@ -162,14 +185,19 @@ func main() {
 		logger.Fatal("Error encoding cache", zap.Error(err))
 	}
 
-	if err := ioutil.WriteFile(cacheFile, p, 0600); err != nil {
-		logger.Fatal("Error writing cache", logFile(cacheFile), zap.Error(err))
+	if cacheFile != "" {
+		if err := ioutil.WriteFile(cacheFile, p, 0600); err != nil {
+			logger.Fatal("Error writing cache", logFile(cacheFile), zap.Error(err))
+		}
+	} else {
+		_, _ = os.Stdout.Write(p)
 	}
 }
 
 const (
 	manPathPrefix     = "usr/share/man/man"
 	manPathTrimPrefix = "usr/share/man/"
+	manDirsPrefix     = "/usr/share/man/man"
 )
 
 // TODO: Propagate list of created files up to caller so that they can be tracked relative as
@@ -215,6 +243,7 @@ func (d *Dumper) processRepoData(ctx context.Context, file string) (err error) {
 
 		wg.Go(func() error {
 			defer d.Sema.Release(2)
+			defer runtime.GC()
 			return d.processPackage(ctx, pkg, pkgfile)
 		})
 	}
@@ -227,7 +256,7 @@ func (d *Dumper) readRepoData(ctx context.Context, file string) (*xrepo.RepoData
 
 	timer := Elapsed("elapsed")
 	Info(ctx, "Processing repodata")
-	defer Info(ctx, "Finished processing repodata", timer())
+	defer func() { Info(ctx, "Finished processing repodata", timer()) }()
 
 	f, err := os.Open(file)
 	if os.IsNotExist(err) {
@@ -252,6 +281,12 @@ func (d *Dumper) readRepoData(ctx context.Context, file string) (*xrepo.RepoData
 func (d *Dumper) processPackage(ctx context.Context, pkg *xrepo.Package, file string) (err error) {
 	ctx = WithFields(ctx, logFile(file))
 
+	if strings.HasSuffix(pkg.Name, "-dbg") || strings.HasSuffix(pkg.Name, "-32bit") {
+		// Skip 32-bit and -dbg packages
+		Debug(ctx, "Ignored debug/32-bit package")
+		return nil
+	}
+
 	if entries, ok := d.Cache[pkg.FilenameSHA256]; ok {
 		Debug(ctx, "Package already dumped")
 		d.recordChange(pkg.FilenameSHA256, entries...)
@@ -260,7 +295,7 @@ func (d *Dumper) processPackage(ctx context.Context, pkg *xrepo.Package, file st
 
 	Info(ctx, "Processing file")
 	timer := Elapsed("elapsed")
-	defer Info(ctx, "Finished processing file", timer())
+	defer func() { Info(ctx, "Finished processing file", timer()) }()
 
 	f, err := os.Open(file)
 	if os.IsNotExist(err) {
@@ -280,7 +315,62 @@ func (d *Dumper) processPackage(ctx context.Context, pkg *xrepo.Package, file st
 
 	tf := tar.NewReader(dec)
 
+	var manpages map[string]struct{}
+	var files packageFiles
 	for {
+		hdr, err := tf.Next()
+		if err == io.EOF {
+			goto done
+		} else if err != nil {
+			Error(ctx, "Error encountered reading package", zap.Error(err))
+			return err
+		}
+
+		if hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+
+		pkgfile := path.Clean(hdr.Name)
+		if pkgfile != "files.plist" {
+			continue
+		}
+
+		buffer, err := copyToMemory(tf)
+		if err != nil {
+			Error(ctx, "Error reading files list", zap.Error(err))
+			return err
+		}
+
+		if err := plist.NewDecoder(buffer).Decode(&files); err != nil {
+			Error(ctx, "Error decoding files list", zap.Error(err))
+			return err
+		}
+
+		break
+	}
+
+	if files.Empty() {
+		goto done
+	}
+
+	for _, dir := range files.Dirs {
+		p := path.Clean(dir.File)
+		if strings.HasPrefix(p, manDirsPrefix) {
+			goto scanPackage
+		}
+	}
+	goto done
+
+scanPackage:
+	manpages = map[string]struct{}{}
+	for _, file := range files.Files {
+		if strings.HasPrefix(file.File, manDirsPrefix) {
+			pkgfile := "." + file.File
+			manpages[pkgfile] = struct{}{}
+		}
+	}
+
+	for len(manpages) > 0 {
 		hdr, err := tf.Next()
 		if err == io.EOF {
 			break
@@ -294,8 +384,11 @@ func (d *Dumper) processPackage(ctx context.Context, pkg *xrepo.Package, file st
 			Error(ctx, "Error processing package file", logPkgFile(hdr.Name), zap.Error(err))
 			return err
 		}
+
+		delete(manpages, hdr.Name)
 	}
 
+done:
 	d.recordChange(pkg.FilenameSHA256)
 
 	return nil
@@ -357,4 +450,25 @@ func logClose(ctx context.Context, c io.Closer) (err error) {
 		Warn(ctx, "Encountered Close error", zap.Error(err))
 	}
 	return err
+}
+
+type packageFiles struct {
+	Files []packageFile `plist:"files"`
+	Dirs  []packageFile `plist:"dirs"`
+}
+
+func (p *packageFiles) Empty() bool {
+	return len(p.Dirs) == 0
+}
+
+type packageFile struct {
+	File string `plist:"file"`
+}
+
+func copyToMemory(r io.Reader) (*bytes.Reader, error) {
+	p, err := ioutil.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(p), nil
 }
