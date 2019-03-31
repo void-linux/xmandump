@@ -39,7 +39,7 @@ func main() {
 
 	// TODO: Make this code less disgusting.
 	var (
-		openLimit      int64  = 64
+		openLimit      int64  = 20
 		flagLevel             = zap.WarnLevel
 		ctx                   = context.Background()
 		flagMode       string = "755"
