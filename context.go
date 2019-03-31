@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"time"
 
 	"go.uber.org/zap"
 )
@@ -54,11 +53,4 @@ func DPanic(ctx context.Context, msg string, fields ...zap.Field) {
 
 func Fatal(ctx context.Context, msg string, fields ...zap.Field) {
 	Logger(ctx).WithOptions(zap.AddCallerSkip(1)).Fatal(msg, fields...)
-}
-
-func Elapsed(key string) func() zap.Field {
-	now := time.Now()
-	return func() zap.Field {
-		return zap.Duration(key, time.Since(now))
-	}
 }

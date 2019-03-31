@@ -1,6 +1,8 @@
 package main
 
 import (
+	"time"
+
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -34,4 +36,11 @@ func logDumpFile(file string) zap.Field {
 
 func logPkgFile(file string) zap.Field {
 	return zap.String("pkgfile", file)
+}
+
+func Elapsed(key string) func() zap.Field {
+	now := time.Now()
+	return func() zap.Field {
+		return zap.Duration(key, time.Since(now))
+	}
 }
