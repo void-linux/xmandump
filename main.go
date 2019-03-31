@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/ulikunitz/xz"
+	"go.spiff.io/nxtools/xrepo"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
@@ -74,16 +75,13 @@ func main() {
 
 	dumper := &Dumper{
 		DirMode: fileMode,
+		Sema:    sema,
 	}
 
 	for _, file := range flag.Args() {
 		file := file
 		wg.Go(func() error {
-			if err := sema.Acquire(ctx, 2); err != nil {
-				return err
-			}
-			defer sema.Release(2)
-			_, err := dumper.processPackage(ctx, file)
+			_, err := dumper.processRepoData(ctx, file)
 			return err
 		})
 	}
@@ -101,9 +99,88 @@ const (
 // TODO: Propagate list of created files up to caller so that they can be tracked relative as
 // new files.
 
+type Semaphore interface {
+	Acquire(context.Context, int64) error
+	Release(int64)
+}
+
 // Dumper processes packages and dumps manpage files to the current directory in the form manN/file.
 type Dumper struct {
 	DirMode os.FileMode
+	Sema    Semaphore
+}
+
+func (d *Dumper) processRepoData(ctx context.Context, file string) (names []string, err error) {
+	rd, err := d.readRepoData(ctx, file)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+
+	results := make(chan []string, 1)
+	wg, ctx := errgroup.WithContext(ctx)
+	dir := filepath.Dir(file)
+	index := rd.Index()
+	for _, pkg := range index {
+		pkg := pkg
+		pkgfile := filepath.Join(dir, pkg.PackageVersion+"."+pkg.Architecture+".xbps")
+
+		if err := d.Sema.Acquire(ctx, 2); err != nil {
+			return nil, err
+		}
+
+		wg.Go(func() error {
+			defer d.Sema.Release(2)
+
+			pkgnames, err := d.processPackage(ctx, pkgfile)
+			if err != nil {
+				return err
+			}
+
+			select {
+			case results <- pkgnames:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	for pkgnames := range results {
+		names = append(names, pkgnames...)
+	}
+
+	return names, nil
+}
+
+func (d *Dumper) readRepoData(ctx context.Context, file string) (*xrepo.RepoData, error) {
+	timer := Elapsed("elapsed")
+	ctx = WithFields(ctx, logRepoData(file))
+
+	Info(ctx, "Processing repodata")
+	defer Info(ctx, "Finished processing repodata", timer())
+
+	f, err := os.Open(file)
+	if os.IsNotExist(err) {
+		Warn(ctx, "File does not exist")
+		return nil, err
+	} else if err != nil {
+		Error(ctx, "Cannot open file", zap.Error(err))
+		return nil, err
+	}
+	defer logClose(ctx, f)
+
+	rd := xrepo.NewRepoData()
+	if err := rd.ReadRepo(f, ""); err != nil {
+		Error(ctx, "Unable to read repodata", zap.Error(err))
+		return nil, err
+	}
+
+	return rd, nil
 }
 
 // processPackage processes an XBPS package and extracts all manpages under the current directory.
@@ -115,7 +192,10 @@ func (d *Dumper) processPackage(ctx context.Context, file string) (names []strin
 	defer Info(ctx, "Finished processing file", timer())
 
 	f, err := os.Open(file)
-	if err != nil {
+	if os.IsNotExist(err) {
+		Warn(ctx, "File does not exist")
+		return nil, nil
+	} else if err != nil {
 		Error(ctx, "Cannot open file", zap.Error(err))
 		return nil, err
 	}

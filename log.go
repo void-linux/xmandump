@@ -19,6 +19,10 @@ func NewLogger(level zap.AtomicLevel) (*zap.Logger, error) {
 	return conf.Build()
 }
 
+func logRepoData(file string) zap.Field {
+	return zap.String("repodata", file)
+}
+
 func logFile(file string) zap.Field {
 	return zap.String("file", file)
 }
