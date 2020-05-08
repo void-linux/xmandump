@@ -17,8 +17,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/ulikunitz/xz"
-	"go.spiff.io/nxtools/xrepo"
+	"go.spiff.io/mandump/internal/nxtools/xrepo"
+
+	"github.com/klauspost/compress/zstd"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
@@ -307,7 +308,7 @@ func (d *Dumper) processPackage(ctx context.Context, pkg *xrepo.Package, file st
 	}
 	defer logClose(ctx, f)
 
-	dec, err := xz.NewReader(f)
+	dec, err := zstd.NewReader(f)
 	if err != nil {
 		Error(ctx, "Unable to create decompressor", zap.Error(err))
 		return err
