@@ -17,7 +17,7 @@ import (
 	"strings"
 	"sync"
 
-	"go.spiff.io/mandump/internal/nxtools/xrepo"
+	"go.spiff.io/xmandump/internal/nxtools/xrepo"
 
 	"github.com/klauspost/compress/zstd"
 	"go.uber.org/zap"
