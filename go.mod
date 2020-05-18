@@ -1,4 +1,4 @@
-module go.spiff.io/mandump
+module go.spiff.io/xmandump
 
 go 1.12
 
