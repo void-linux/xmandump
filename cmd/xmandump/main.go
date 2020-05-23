@@ -19,7 +19,10 @@ import (
 
 	"go.spiff.io/xmandump/internal/nxtools/xrepo"
 
+	"github.com/gabriel-vasile/mimetype"
 	"github.com/klauspost/compress/zstd"
+	"github.com/ulikunitz/xz"
+
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/semaphore"
@@ -308,7 +311,22 @@ func (d *Dumper) processPackage(ctx context.Context, pkg *xrepo.Package, file st
 	}
 	defer logClose(ctx, f)
 
-	dec, err := zstd.NewReader(f)
+	mime, err := mimetype.DetectFile(file)
+	if err != nil {
+		Error(ctx, "Cannot detect file type", zap.Error(err))
+	}
+
+	var dec io.Reader
+	err = nil
+	switch {
+	case mime.Is("application/x-xz"):
+		dec, err = xz.NewReader(f)
+	case mime.Is("application/zstd"):
+		dec, err = zstd.NewReader(f)
+	default:
+		err = fmt.Errorf("Compression format for %s is not supported", file)
+	}
+
 	if err != nil {
 		Error(ctx, "Unable to create decompressor", zap.Error(err))
 		return err
