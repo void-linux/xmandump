@@ -309,7 +309,6 @@ func (d *Dumper) processPackage(ctx context.Context, pkg *xrepo.Package, file st
 		Error(ctx, "Cannot open file", zap.Error(err))
 		return err
 	}
-	defer logClose(ctx, f)
 
 	mime, err := mimetype.DetectFile(file)
 	if err != nil {
@@ -410,6 +409,7 @@ scanPackage:
 done:
 	d.recordChange(pkg.FilenameSHA256)
 
+	f.Close()
 	return nil
 }
 
