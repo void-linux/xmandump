@@ -12,7 +12,7 @@ import (
 	"os"
 	"sort"
 
-	"go.spiff.io/xmandump/internal/nxtools/xbps"
+	"github.com/void-linux/xmandump/internal/nxtools/xbps"
 
 	"github.com/klauspost/compress/zstd"
 	"howett.net/plist"

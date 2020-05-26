@@ -17,7 +17,7 @@ import (
 	"strings"
 	"sync"
 
-	"go.spiff.io/xmandump/internal/nxtools/xrepo"
+	"github.com/void-linux/xmandump/internal/nxtools/xrepo"
 
 	"github.com/gabriel-vasile/mimetype"
 	"github.com/klauspost/compress/zstd"
