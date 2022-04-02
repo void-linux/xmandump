@@ -414,16 +414,17 @@ done:
 }
 
 // processPackageFile checks the tar header to see if the packaged file is a manpage and, if it is,
-// extracts it. If the packaged file is a manpage symlink or link, it is ignored.
+// extracts it. If the packaged file is a manpage symlink, create that link.
 func (d *Dumper) processPackageFile(ctx context.Context, pkg *xrepo.Package, hdr *tar.Header, r io.Reader) (err error) {
 	ctx = WithFields(ctx, logPkgFile(hdr.Name))
+	symlink := false
 
 	switch hdr.Typeflag {
 	case tar.TypeReg:
-	case tar.TypeLink, tar.TypeSymlink:
-		// TODO: Handle manpage symlinks at all?
-		// return processManLink(ctx, hdr)
-		return nil
+		Debug(ctx, "Found manpage")
+	case tar.TypeSymlink:
+		Debug(ctx, "Found symlink")
+		symlink = true
 	default:
 		return nil
 	}
@@ -432,8 +433,6 @@ func (d *Dumper) processPackageFile(ctx context.Context, pkg *xrepo.Package, hdr
 	if !strings.HasPrefix(pkgfile, manPathPrefix) {
 		return nil
 	}
-
-	Debug(ctx, "Found manpage")
 
 	relpath := strings.TrimPrefix(pkgfile, manPathTrimPrefix)
 	relpath = filepath.FromSlash(relpath)
@@ -446,17 +445,24 @@ func (d *Dumper) processPackageFile(ctx context.Context, pkg *xrepo.Package, hdr
 		return err
 	}
 
-	// TODO: Dump manpage to filesystem after stripping usr/share/ prefix
-	f, err := os.Create(relpath)
-	if err != nil {
-		Error(ctx, "Unable to create dumped file")
-		return err
-	}
-	defer logClose(ctx, f)
+	if !symlink {
+		// TODO: Dump manpage to filesystem after stripping usr/share/ prefix
+		f, err := os.Create(relpath)
+		if err != nil {
+			Error(ctx, "Unable to create dumped file")
+			return err
+		}
+		defer logClose(ctx, f)
 
-	if _, err := io.Copy(f, r); err != nil {
-		Error(ctx, "Error copying pkgfile to dumpfile", zap.Error(err))
-		return err
+		if _, err := io.Copy(f, r); err != nil {
+			Error(ctx, "Error copying pkgfile to dumpfile", zap.Error(err))
+			return err
+		}
+	} else {
+		if err := os.Symlink(hdr.Linkname, relpath); err != nil {
+			Error(ctx, "Unable to create symlink")
+			return err
+		}
 	}
 
 	d.recordChange(pkg.FilenameSHA256, relpath)
