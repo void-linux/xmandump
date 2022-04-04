@@ -381,7 +381,7 @@ func (d *Dumper) processPackage(ctx context.Context, pkg *xrepo.Package, file st
 
 scanPackage:
 	manpages = map[string]struct{}{}
-	for _, file := range files.Files {
+	for _, file := range append(files.Files, files.Links...) {
 		if strings.HasPrefix(file.File, manDirsPrefix) {
 			pkgfile := "." + file.File
 			manpages[pkgfile] = struct{}{}
@@ -474,6 +474,7 @@ func logClose(ctx context.Context, c io.Closer) (err error) {
 type packageFiles struct {
 	Files []packageFile `plist:"files"`
 	Dirs  []packageFile `plist:"dirs"`
+	Links []packageFile `plist:"links"`
 }
 
 func (p *packageFiles) Empty() bool {
