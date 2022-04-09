@@ -459,6 +459,13 @@ func (d *Dumper) processPackageFile(ctx context.Context, pkg *xrepo.Package, hdr
 			return err
 		}
 	} else {
+		// check if a file already exists and remove it
+		if _, err := os.Lstat(relpath); err == nil {
+			if err := os.Remove(relpath); err != nil {
+				Error(ctx, "Unable to remove existing file")
+				return err
+			}
+		}
 		if err := os.Symlink(hdr.Linkname, relpath); err != nil {
 			Error(ctx, "Unable to create symlink")
 			return err
