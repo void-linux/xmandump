@@ -486,7 +486,7 @@ func (d *Dumper) processPackageFile(ctx context.Context, pkg *xrepo.Package, hdr
 	}
 
 	if d.Compress {
-		relpath = relpath + ".gz"
+		relpath += ".gz"
 	}
 	if !symlink {
 		// TODO: Dump manpage to filesystem after stripping usr/share/ prefix
@@ -514,7 +514,11 @@ func (d *Dumper) processPackageFile(ctx context.Context, pkg *xrepo.Package, hdr
 				return err
 			}
 		}
-		if err := os.Symlink(hdr.Linkname, relpath); err != nil {
+		lname := hdr.Linkname
+		if d.Compress {
+			lname += ".gz"
+		}
+		if err := os.Symlink(lname, relpath); err != nil {
 			Error(ctx, "Unable to create symlink")
 			return err
 		}
