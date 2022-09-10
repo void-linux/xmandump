@@ -277,7 +277,6 @@ func (d *Dumper) processRepoData(ctx context.Context, file string) (err error) {
 
 		wg.Go(func() error {
 			defer d.Sema.Release(2)
-			defer runtime.GC()
 			return d.processPackage(ctx, pkg, pkgfile)
 		})
 	}
