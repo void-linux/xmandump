@@ -345,13 +345,17 @@ func (d *Dumper) processPackage(ctx context.Context, pkg *xrepo.Package, file st
 		Error(ctx, "Cannot detect file type", zap.Error(err))
 	}
 
-	var dec io.Reader
+	var dec io.ReadCloser
 	err = nil
 	switch {
 	case mime.Is("application/x-xz"):
-		dec, err = xz.NewReader(f)
+		var xzDec *xz.Reader
+		xzDec, err = xz.NewReader(f)
+		dec = io.NopCloser(xzDec)
 	case mime.Is("application/zstd"):
-		dec, err = zstd.NewReader(f)
+		var zstdDec *zstd.Decoder
+		zstdDec, err = zstd.NewReader(f)
+		dec = zstdDec.IOReadCloser()
 	default:
 		err = fmt.Errorf("Compression format for %s is not supported", file)
 	}
@@ -361,6 +365,7 @@ func (d *Dumper) processPackage(ctx context.Context, pkg *xrepo.Package, file st
 		return err
 	}
 
+	defer dec.Close()
 	tf := tar.NewReader(dec)
 
 	var manpages map[string]struct{}
