@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"flag"
@@ -51,6 +52,7 @@ func main() {
 		fileMode       os.FileMode
 		cacheFile      string
 		cache          cacheRecords
+		compress       bool
 		removeOldFiles bool
 		cpuprofile     string
 		memprofile     string
@@ -68,6 +70,7 @@ func main() {
 	flag.StringVar(&memprofile, "memprofile", "", "write to mem profile file")
 	flag.StringVar(&cpuprofile, "cpuprofile", "", "write to cpu profile file")
 	flag.BoolVar(&removeOldFiles, "b", false, "remove old files")
+	flag.BoolVar(&compress, "compress", false, "compress files")
 	flag.StringVar(&cacheFile, "c", "", "cache file")
 	flag.StringVar(&flagMode, "m", flagMode, "directory permissions")
 	flag.Var(&flagLevel, "v", "log level")
@@ -140,10 +143,11 @@ func main() {
 	wg, ctx := errgroup.WithContext(ctx)
 
 	dumper := &Dumper{
-		DirMode: fileMode,
-		Sema:    sema,
-		Cache:   cache.Cache,
-		Updates: map[string][]string{},
+		DirMode:  fileMode,
+		Sema:     sema,
+		Cache:    cache.Cache,
+		Compress: compress,
+		Updates:  map[string][]string{},
 	}
 
 	filerefs := map[string]struct{}{}
@@ -241,6 +245,8 @@ const (
 type Dumper struct {
 	DirMode os.FileMode
 	Sema    *semaphore.Weighted
+
+	Compress bool
 
 	m       sync.Mutex
 	Cache   map[string][]string
@@ -479,6 +485,9 @@ func (d *Dumper) processPackageFile(ctx context.Context, pkg *xrepo.Package, hdr
 		return err
 	}
 
+	if d.Compress {
+		relpath = relpath + ".gz"
+	}
 	if !symlink {
 		// TODO: Dump manpage to filesystem after stripping usr/share/ prefix
 		f, err := os.Create(relpath)
@@ -486,9 +495,14 @@ func (d *Dumper) processPackageFile(ctx context.Context, pkg *xrepo.Package, hdr
 			Error(ctx, "Unable to create dumped file")
 			return err
 		}
+		w := io.WriteCloser(f)
+		defer logClose(ctx, w)
 		defer logClose(ctx, f)
+		if d.Compress {
+			w = gzip.NewWriter(w)
+		}
 
-		if _, err := io.Copy(f, r); err != nil {
+		if _, err := io.Copy(w, r); err != nil {
 			Error(ctx, "Error copying pkgfile to dumpfile", zap.Error(err))
 			return err
 		}
