@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +52,8 @@ func main() {
 		cacheFile      string
 		cache          cacheRecords
 		removeOldFiles bool
+		cpuprofile     string
+		memprofile     string
 	)
 
 	maxLimit, limErr := getFileLimit()
@@ -62,6 +65,8 @@ func main() {
 		flagMode = fmt.Sprintf("%03o", uint32(stat.Mode()&0x1ff))
 	}
 
+	flag.StringVar(&memprofile, "memprofile", "", "write to mem profile file")
+	flag.StringVar(&cpuprofile, "cpuprofile", "", "write to cpu profile file")
 	flag.BoolVar(&removeOldFiles, "b", false, "remove old files")
 	flag.StringVar(&cacheFile, "c", "", "cache file")
 	flag.StringVar(&flagMode, "m", flagMode, "directory permissions")
@@ -80,6 +85,19 @@ func main() {
 
 	zap.ReplaceGlobals(logger)
 	ctx = WithLogger(ctx, logger)
+
+	// Start CPU profiling (if set)
+	if cpuprofile != "" {
+		f, err := os.Create(cpuprofile)
+		if err != nil {
+			logger.Fatal("Failed to create CPU profile file", zap.Error(err))
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			logger.Fatal("Failed to start CPU profile", zap.Error(err))
+		}
+		defer pprof.StopCPUProfile()
+	}
 
 	// Load cache (if any)
 	if cacheFile != "" {
@@ -145,6 +163,18 @@ func main() {
 
 	if err := wg.Wait(); err != nil {
 		logger.Fatal("Fatal error processing files", zap.Error(err))
+	}
+
+	if memprofile != "" {
+		f, err := os.Create(memprofile)
+		if err != nil {
+			logger.Fatal("Failed to create memory profile file", zap.Error(err))
+		}
+		defer f.Close()
+		runtime.GC()
+		if err := pprof.WriteHeapProfile(f); err != nil {
+			logger.Fatal("Failed to write memory profile", zap.Error(err))
+		}
 	}
 
 	// If we're not removing old files, just copy everything from the cache into updates.
