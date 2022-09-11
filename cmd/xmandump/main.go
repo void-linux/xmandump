@@ -495,11 +495,11 @@ func (d *Dumper) processPackageFile(ctx context.Context, pkg *xrepo.Package, hdr
 			Error(ctx, "Unable to create dumped file")
 			return err
 		}
-		defer logClose(ctx, f)
 		w := io.WriteCloser(f)
 		defer logClose(ctx, w)
 		if d.Compress {
 			w = gzip.NewWriter(w)
+			defer logClose(ctx, w)
 		}
 
 		if _, err := io.Copy(w, r); err != nil {
