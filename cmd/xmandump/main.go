@@ -488,6 +488,15 @@ func (d *Dumper) processPackageFile(ctx context.Context, pkg *xrepo.Package, hdr
 	if d.Compress {
 		relpath += ".gz"
 	}
+
+	// check if a file already exists and remove it
+	if _, err := os.Lstat(relpath); err == nil {
+		if err := os.Remove(relpath); err != nil {
+			Error(ctx, "Unable to remove existing file")
+			return err
+		}
+	}
+
 	if !symlink {
 		// TODO: Dump manpage to filesystem after stripping usr/share/ prefix
 		f, err := os.Create(relpath)
@@ -507,13 +516,6 @@ func (d *Dumper) processPackageFile(ctx context.Context, pkg *xrepo.Package, hdr
 			return err
 		}
 	} else {
-		// check if a file already exists and remove it
-		if _, err := os.Lstat(relpath); err == nil {
-			if err := os.Remove(relpath); err != nil {
-				Error(ctx, "Unable to remove existing file")
-				return err
-			}
-		}
 		lname := hdr.Linkname
 		if d.Compress {
 			lname += ".gz"
